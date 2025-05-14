@@ -41,6 +41,10 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 from torch.utils.tensorboard import SummaryWriter
 
+import numpy as np
+import pathlib
+import json
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  Hyper‑Parameters (overridden by CLI)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -115,6 +119,23 @@ class ReplayBuffer:
         next_obs = torch.as_tensor(self.next_obs_buf[indices], device=self.device)
         done = torch.as_tensor(self.done_buf[indices], device=self.device)
         return obs, acts, rews, next_obs, done
+
+    def get_rewards(self):
+        """Return a view of the rewards currently stored (shape [N,1])."""
+        max_mem = self.capacity if self.full else self.ptr
+        return self.rews_buf[:max_mem]                    # np.float32 view
+
+    def reward_summary(self, threshold: float = 90.0):
+        """Quick summary dict – cheap enough to call every 1 k steps."""
+        r = self.get_rewards()
+        return dict(
+            mean=float(r.mean()) if r.size else 0.0,
+            std=float(r.std()) if r.size else 0.0,
+            max=float(r.max()) if r.size else 0.0,
+            pos_ratio=float((r > 0).mean()) if r.size else 0.0,
+            big_ratio=float((r >= threshold).mean()) if r.size else 0.0,
+            n_samples=int(r.size),
+        )
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Networks
@@ -332,6 +353,9 @@ def evaluate(agent: SACAgent, env: gym.Env, n_episodes: int):
         returns.append(ep_ret)
     return float(np.mean(returns))
 
+def get_cfg_name(cfg):
+    run_name = f"SAC_{cfg.env}_a-{cfg.alpha}_lr-{cfg.lr}_tf-{cfg.train_freq}_gd-{cfg.gradient_step}_s-{cfg.seed}"
+    return run_name
 
 def run(cfg):
     env = gym.make(cfg.env)
@@ -343,18 +367,33 @@ def run(cfg):
     replay = ReplayBuffer(cfg.replay_size, env.observation_space.shape,
                           env.action_space.shape[0], cfg.device)
 
-    run_name = f"SAC_{cfg.env}_{int(time.time())}"
+    run_name = get_cfg_name(cfg)
+    fname = f"./runs/{run_name}.npz"
+    if(os.path.exists(fname)):
+        print(f"File {fname} already exists. Exiting.")
+        exit(0)
     writer = SummaryWriter(os.path.join("runs", run_name))
 
     obs, _ = env.reset(seed=cfg.seed)
     agent.reset_sde()
     episode_return, episode_length = 0.0, 0
 
+    epi_returns, eval_returns = [], []           # 1-D lists
+    epi_lengths, action_jitters = [], [0.0]         # 1-D lists
+    losses_q1, losses_q2, losses_pi, alphas = [], [], [], []
+    buffer_stats = []
+
+    prev_action = None  
+
     for global_step in tqdm(range(1, cfg.total_steps + 1)):
         if global_step < cfg.start_steps:
             action = env.action_space.sample()
         else:
             action = agent.select_action(obs)
+        
+        if prev_action is not None:
+            action_jitters[-1] += np.mean(np.abs(action - prev_action))
+        prev_action = action
 
         next_obs, reward, done, truncated, _ = env.step(action)
         terminal = done or truncated
@@ -367,6 +406,16 @@ def run(cfg):
         if terminal:
             writer.add_scalar("charts/episode_return", episode_return, global_step)
             writer.add_scalar("charts/episode_length", episode_length, global_step)
+            
+
+            epi_returns.append(episode_return)
+            epi_lengths.append(episode_length)
+            # normalise jitter by episode length
+            action_jitters.append(action_jitters[-1] / episode_length)
+            action_jitters[-2] = action_jitters[-1]      # fix previous step
+            prev_action = None                            # reset
+            action_jitters.append(0.0)                    # placeholder for next ep.
+
             obs, _ = env.reset()
             agent.reset_sde()
             episode_return, episode_length = 0.0, 0
@@ -376,6 +425,9 @@ def run(cfg):
             if(global_step % cfg.train_freq == 0):
                 for _ in range(cfg.gradient_step):
                     metrics = agent.update(replay, cfg.batch_size)
+                losses_q1.append(metrics["q1_loss"])
+                losses_q2.append(metrics["q2_loss"])
+                losses_pi.append(metrics["policy_loss"])
             if global_step % 1000 == 0:
                 for k, v in metrics.items():
                     writer.add_scalar(f"losses/{k}", v, global_step)
@@ -383,10 +435,32 @@ def run(cfg):
         # Periodic evaluation
         if global_step % cfg.eval_interval == 0:
             eval_ret = evaluate(agent, env, cfg.n_eval_episodes)
+            eval_returns.append([global_step, eval_ret])
             writer.add_scalar("charts/eval_return", eval_ret, global_step)
             print(f"Step {global_step:>7}: eval_return = {eval_ret:.1f}")
+            
+            if global_step >= cfg.start_steps:
+                s = replay.reward_summary(threshold=90.0)
+                buffer_stats.append([global_step,
+                                     s["mean"], s["std"],
+                                     s["max"], s["pos_ratio"],
+                                     s["big_ratio"], s["n_samples"]])
 
     env.close(); writer.close()
+    
+    out = dict(
+        epi_returns=np.asarray(epi_returns),
+        epi_lengths=np.asarray(epi_lengths),
+        action_jitters=np.asarray(action_jitters[:-1]),   # drop last placeholder
+        eval_returns=np.asarray(eval_returns),            # shape (N,2)
+        q1=np.asarray(losses_q1),
+        q2=np.asarray(losses_q2),
+        pi=np.asarray(losses_pi),
+        cfg=cfg,
+        buffer_stats=buffer_stats,
+    )
+    fname = f"./runs/{run_name}.npz"
+    np.savez_compressed(fname, **out)
     print("Training complete — logs in ./runs/")
 
 # ──────────────────────────────────────────────────────────────────────────────
