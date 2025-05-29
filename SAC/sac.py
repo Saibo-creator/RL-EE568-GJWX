@@ -132,7 +132,8 @@ class ReplayBuffer:
             mean=float(r.mean()) if r.size else 0.0,
             std=float(r.std()) if r.size else 0.0,
             max=float(r.max()) if r.size else 0.0,
-            pos_ratio=float((r > 0).mean()) if r.size else 0.0,
+            pos_ratio=float((r > 0).sum()) if r.size else 0.0,
+            big_count=float((r >= threshold).sum()) if r.size else 0.0,
             big_ratio=float((r >= threshold).mean()) if r.size else 0.0,
             n_samples=int(r.size),
         )
@@ -181,7 +182,7 @@ class GaussianPolicy(nn.Module):
     def sample(self, state, return_std = False):
         mu, std = self.forward(state)
         normal = Normal(mu, std)
-        x_t = normal.rsample()                         # reparameterisation
+        x_t = normal.rsample()
         y_t = torch.tanh(x_t)
         action = y_t
         # SAC log‑prob trick (appendix C)
@@ -354,7 +355,7 @@ def evaluate(agent: SACAgent, env: gym.Env, n_episodes: int):
     return float(np.mean(returns))
 
 def get_cfg_name(cfg):
-    run_name = f"SAC_{cfg.env}_a-{cfg.alpha}_lr-{cfg.lr}_tf-{cfg.train_freq}_gd-{cfg.gradient_step}_s-{cfg.seed}"
+    run_name = f"SAC_{cfg.env}_a-{cfg.alpha}_d-{cfg.hidden_dim}_tau-{cfg.tau}_lr-{cfg.lr}_bs-{cfg.batch_size}_tf-{cfg.train_freq}_gd-{cfg.gradient_step}_sde-{cfg.use_sde}_s-{cfg.seed}"
     return run_name
 
 def run(cfg):
@@ -369,9 +370,10 @@ def run(cfg):
 
     run_name = get_cfg_name(cfg)
     fname = f"./runs/{run_name}.npz"
-    if(os.path.exists(fname)):
-        print(f"File {fname} already exists. Exiting.")
-        exit(0)
+    print(fname)
+    # if(os.path.exists(fname)):
+    #     print(f"File {fname} already exists. Exiting.")
+    #     exit(0)
     writer = SummaryWriter(os.path.join("runs", run_name))
 
     obs, _ = env.reset(seed=cfg.seed)
@@ -443,7 +445,7 @@ def run(cfg):
                 s = replay.reward_summary(threshold=90.0)
                 buffer_stats.append([global_step,
                                      s["mean"], s["std"],
-                                     s["max"], s["pos_ratio"],
+                                     s["max"], s["pos_ratio"], s["big_count"],
                                      s["big_ratio"], s["n_samples"]])
 
     env.close(); writer.close()

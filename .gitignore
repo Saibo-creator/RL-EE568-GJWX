@@ -174,4 +174,4 @@ cython_debug/
 .pypirc
 
 # SAC logs
-/SAC-yt/runs/
+/SAC/runs/
