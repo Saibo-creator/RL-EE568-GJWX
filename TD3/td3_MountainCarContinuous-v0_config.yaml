@@ -1,0 +1,46 @@
+# TD3 Hyperparameter Configuration for Pendulum-v1
+
+env_name: MountainCarContinuous-v0
+algorithm: TD3
+
+seed: 42
+total_training_steps: 50_000
+start_timesteps: 25_000   # steps before training begins (pure exploration)
+# Environment             # higher than usual
+
+# Replay Buffer
+replay_buffer:
+  size: 1_000_000
+  batch_size: 1_000
+
+# Actor Network
+actor:
+  learning_rate: 0.001
+  hidden_layers: [400, 300]
+  activation: relu
+  noise_std: 0.5       # exploration noise
+  noise_type: ou       # type of noise (Ornstein-Uhlenbeck)
+
+# Critic Network
+critic:
+  learning_rate: 0.001
+  hidden_layers: [400, 300]
+  activation: relu
+
+# Target Networks
+target_network:
+  tau: 0.005           # soft update rate
+  policy_noise: 0.3    # added to target actions
+  noise_clip: 0.5      # clip target noise
+
+# RL Settings
+discount_factor: 0.99
+policy_delay: 2
+
+# Logging and Evaluation
+
+# Notes
+notes: |
+  - Using tanh in the actor output scaled by max_action.
+  - Target networks initialized with main network parameters.
+  - No observation normalization or reward scaling applied.
